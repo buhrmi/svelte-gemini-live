@@ -7,8 +7,8 @@
     apiKey: token.name,
     httpOptions: { apiVersion: 'v1alpha' }
   });
-  const model = "gemini-live-2.5-flash-preview"
-
+  // const model = "gemini-live-2.5-flash-preview"
+  const model = "gemini-2.5-flash-preview-native-audio-dialog"
   const config = {
     responseModalities: [Modality.AUDIO],
     outputAudioTranscription: {},
@@ -21,13 +21,11 @@
       }
     },
     systemInstruction:
-      "Du bist Onkel Stefan, ein weltklasse Coach in Kindererziehung, spezialisiert auf bedürfnisorientierte Erziehung. Statt auf Strafen oder Belohnungen setzt du auf eine echte Beziehung, Verständnis und gemeinsame Lösungen. Ziel ist es, die Kinder in ihrer Selbstwirksamkeit zu stärken und eine sichere Bindung aufzubauen, die Entwicklung und Vertrauen fördert. Dies gelingt dir, indem du Vermutungen und Hypothesen über die Bedürfnisse und Gefühle der Kinder anstellst. Überprüfe deine Hypothesen, indem du weiterführende Fragen stellst.",
+      "Du bist Herr Stranzberg, ein weltklasse Familiencoach. Du hilfst Eltern dabei, ihre Kinder in ihrer Selbstwirksamkeit zu stärken und eine sichere Bindung aufzubauen, die Entwicklung und Vertrauen fördert. Solltest du mehr Informationen über die Kinder benötigen (z.B. Alter, Geschlecht, Name), frage danach.",
   };
 
   let audioContext;
-  let audioQueue = [];
-  let isPlaying = false;
-  let nextPlayTime = 0;
+  let audioPlayerNode = null;
   let session = null;
 
   // for microphone input
@@ -40,6 +38,13 @@
   async function start() {
     if (!audioContext) {
       audioContext = new AudioContext();
+      try {
+        await audioContext.audioWorklet.addModule('audio-player-processor.js');
+        audioPlayerNode = new AudioWorkletNode(audioContext, 'audio-player-processor');
+        audioPlayerNode.connect(audioContext.destination);
+      } catch (e) {
+        console.error('Error loading audio worklet:', e);
+      }
     }
     session = await ai.live.connect({
       model: model,
@@ -62,31 +67,6 @@
 
   }
 
-  function playNextInQueue() {
-    if (audioQueue.length === 0 || isPlaying) {
-      return;
-    }
-    isPlaying = true;
-
-    const audioData = audioQueue.shift();
-    const buffer = audioContext.createBuffer(1, audioData.length, 24000);
-    buffer.getChannelData(0).set(audioData);
-
-    const source = audioContext.createBufferSource();
-    source.buffer = buffer;
-    source.connect(audioContext.destination);
-    
-    const playTime = Math.max(audioContext.currentTime, nextPlayTime);
-    source.start(playTime);
-    
-    nextPlayTime = playTime + buffer.duration;
-
-    source.onended = () => {
-      isPlaying = false;
-      playNextInQueue();
-    };
-  }
-
   function handleTurn(modelTurn) {
     modelTurn.parts.forEach((part) => {
       if (part.inlineData) {
@@ -106,8 +86,27 @@
           float32Data[i] = pcmData[i] / 32768.0; // Convert to Float32 range [-1, 1]
         }
         
-        audioQueue.push(float32Data);
-        playNextInQueue();
+        if (audioPlayerNode) {
+          const sourceSampleRate = 24000;
+          const targetSampleRate = audioContext.sampleRate;
+
+          if (sourceSampleRate === targetSampleRate) {
+            audioPlayerNode.port.postMessage({ audio: float32Data });
+          } else {
+            // Resample audio to match AudioContext's sample rate
+            const ratio = targetSampleRate / sourceSampleRate;
+            const resampledLength = Math.floor(float32Data.length * ratio);
+            const resampledData = new Float32Array(resampledLength);
+            for (let i = 0; i < resampledLength; i++) {
+              const srcIndex = i / ratio;
+              const index1 = Math.floor(srcIndex);
+              const index2 = Math.min(index1 + 1, float32Data.length - 1);
+              const frac = srcIndex - index1;
+              resampledData[i] = float32Data[index1] * (1 - frac) + float32Data[index2] * frac;
+            }
+            audioPlayerNode.port.postMessage({ audio: resampledData });
+          }
+        }
       }
     })
   }
@@ -117,8 +116,9 @@
       const response = responseQueue.shift();
       if (!response.serverContent) continue;
       if (response.serverContent.interrupted) {
-        audioQueue = [];
-        isPlaying = false;
+        if (audioPlayerNode) {
+          audioPlayerNode.port.postMessage({ clear: true });
+        }
         console.log("INTEERRUPTED")
       }
       const modelTurn = response.serverContent.modelTurn;
@@ -137,6 +137,17 @@
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     if (!audioContext) {
       audioContext = new AudioContext();
+      try {
+        await audioContext.audioWorklet.addModule('audio-player-processor.js');
+        audioPlayerNode = new AudioWorkletNode(audioContext, 'audio-player-processor');
+        audioPlayerNode.connect(audioContext.destination);
+      } catch (e) {
+        console.error('Error loading audio worklet:', e);
+      }
+    }
+    // Resume AudioContext on user gesture
+    if (audioContext.state === 'suspended') {
+      audioContext.resume();
     }
     source = audioContext.createMediaStreamSource(stream);
     audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
@@ -185,7 +196,9 @@
     if (audioProcessor) {
       audioProcessor.disconnect();
     }
-    audioQueue = [];
+    if (audioPlayerNode) {
+      audioPlayerNode.port.postMessage({ clear: true });
+    }
   }
 </script>
 
