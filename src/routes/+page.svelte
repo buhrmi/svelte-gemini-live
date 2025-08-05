@@ -18,10 +18,10 @@
   let outputNode: GainNode;
   let nextStartTime = 0;
   let mediaStream: MediaStream;
-  let sourceNode: AudioBufferSourceNode;
-  let scriptProcessorNode: ScriptProcessorNode;
+  let sourceNode: MediaStreamAudioSourceNode;
+  let workletNode: AudioWorkletNode;
   const sources = new Set<AudioBufferSourceNode>();
-  const BUFFER_DURATION = 0.05; // 50ms buffer for smoother playback
+  const BUFFER_DURATION = 0.1; // 1s buffer for smoother playback
 
   function initAudio() {
     outputAudioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -41,11 +41,11 @@
     outputNode.connect(outputAudioContext.destination);
 
     initSession();
+    startRecording();
   }
 
   async function initSession() {
-    // const model = 'gemini-2.5-flash-preview-native-audio-dialog';
-    const model = 'gemini-2.5-flash-exp-native-audio-thinking-dialog'
+    const model = 'gemini-2.5-flash-preview-native-audio-dialog';
 
     try {
       session = await client.live.connect({
@@ -56,7 +56,6 @@
           },
           onmessage: async (message: LiveServerMessage) => {
             const audio = message.serverContent?.modelTurn?.parts[0]?.inlineData;
-            console.log(message)
             if (audio) {
               // Ensure we're always scheduling slightly ahead
               nextStartTime = Math.max(
@@ -80,6 +79,7 @@
               // Add a small overlap to prevent gaps
               nextStartTime = nextStartTime + audioBuffer.duration;
               sources.add(source);
+  
             }
 
             const interrupted = message.serverContent?.interrupted;
@@ -88,7 +88,8 @@
                 source.stop();
                 sources.delete(source);
               }
-              nextStartTime = 0;
+              // Instead of resetting to 0, set nextStartTime to a safe value in the future
+              nextStartTime = outputAudioContext.currentTime + BUFFER_DURATION;
             }
           },
           onerror: (e: ErrorEvent) => {
@@ -101,7 +102,7 @@
         config: {
           responseModalities: [Modality.AUDIO],
           systemInstruction:
-            "Du bist Herr Stranzberg, ein weltklasse Familiencoach. Du sprichst gleichzeitig mit Eltern und Kindern, und hilfst dabei, die Kinder in ihrer Selbstwirksamkeit zu stärken und eine sichere Bindung aufzubauen, die Entwicklung und Vertrauen fördert. Solltest du keine Informationen über die Kinder vorliegen haben (z.B. Alter, Geschlecht, Name), frage danach.",  
+            "Du bist Herr Stranzberg, ein weltklasse Familiencoach. Du sprichst gleichzeitig mit Eltern und Kindern, und hilfst dabei, die Kinder in ihrer Selbstwirksamkeit zu stärken und eine sichere Bindung aufzubauen, die Entwicklung und Vertrauen fördert. Solltest du keine Informationen über die Kinder vorliegen haben (z.B. Alter, Geschlecht, Name), dann frage die Kinder danach.",  
           speechConfig: {
                 languageCode: "de-DE",
                 voiceConfig: {
@@ -148,57 +149,23 @@
 
       // Create AudioContext without specifying sample rate to avoid mismatch
       inputAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+      
+      // Load the AudioWorklet module
+      await inputAudioContext.audioWorklet.addModule('/src/lib/pcm-processor.js');
+      
       inputNode = inputAudioContext.createGain();
 
-      sourceNode = inputAudioContext.createMediaStreamSource(
-        mediaStream,
-      );
+      sourceNode = inputAudioContext.createMediaStreamSource(mediaStream);
       sourceNode.connect(inputNode);
 
-      // Increase buffer size for Firefox compatibility
-      const bufferSize = 4096; // Increased from 256
-      scriptProcessorNode = inputAudioContext.createScriptProcessor(
-        bufferSize,
-        1,
-        1,
-      );
-      const targetSampleRate = 16000;
-      const resampleRatio = inputAudioContext.sampleRate / targetSampleRate;
+      // Create AudioWorklet node
+      workletNode = new AudioWorkletNode(inputAudioContext, 'pcm-processor');
       
-      // Add a buffer to accumulate samples for smoother transmission
-      let accumulatedSamples = [];
-      const SAMPLES_PER_CHUNK = 1600; // 100ms at 16kHz
-      
-      scriptProcessorNode.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        const outputLength = Math.floor(inputData.length / resampleRatio);
-        const outputData = new Int16Array(outputLength);
-
-        // Improved resampling with linear interpolation
-        for (let i = 0; i < outputLength; i++) {
-          const exactIndex = i * resampleRatio;
-          const index = Math.floor(exactIndex);
-          const fraction = exactIndex - index;
-          
-          let sample = inputData[index];
-          if (index + 1 < inputData.length) {
-            const nextSample = inputData[index + 1];
-            sample = sample * (1 - fraction) + nextSample * fraction;
-          }
-          
-          sample = Math.max(-1, Math.min(1, sample)); // clamp
-          outputData[i] = Math.round(sample * 32767);
-        }
-
-        // Accumulate samples
-        accumulatedSamples.push(...outputData);
-        
-        // Send in chunks to reduce overhead
-        while (accumulatedSamples.length >= SAMPLES_PER_CHUNK) {
-          const chunk = new Int16Array(accumulatedSamples.slice(0, SAMPLES_PER_CHUNK));
-          accumulatedSamples = accumulatedSamples.slice(SAMPLES_PER_CHUNK);
-          
-          const base64Audio = btoa(String.fromCharCode.apply(null, new Uint8Array(chunk.buffer)));
+      // Handle messages from the worklet
+      workletNode.port.onmessage = (event) => {
+        if (event.data.type === 'pcm-data') {
+          const pcmData = new Int16Array(event.data.data);
+          const base64Audio = btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData.buffer)));
           
           if (session && isRecording) {
             session.sendRealtimeInput({
@@ -211,8 +178,8 @@
         }
       };
 
-      sourceNode.connect(scriptProcessorNode);
-      scriptProcessorNode.connect(inputAudioContext.destination);
+      inputNode.connect(workletNode);
+      workletNode.connect(inputAudioContext.destination);
 
       isRecording = true;
       updateStatus('🔴 Recording... Capturing PCM chunks.');
@@ -230,12 +197,12 @@
 
     isRecording = false;
 
-    if (scriptProcessorNode && sourceNode && inputAudioContext) {
-      scriptProcessorNode.disconnect();
+    if (workletNode && sourceNode && inputAudioContext) {
+      workletNode.disconnect();
       sourceNode.disconnect();
     }
 
-    scriptProcessorNode = null;
+    workletNode = null;
     sourceNode = null;
 
     if (mediaStream) {
@@ -265,7 +232,7 @@
 </script>
 
 <div>
-  <div class="controls">
+  <!-- <div class="controls">
     <button
       id="resetButton"
       on:click={reset}
@@ -306,9 +273,13 @@
         <rect x="0" y="0" width="100" height="100" rx="15" />
       </svg>
     </button>
-  </div>
+  </div> -->
 
   <div id="status"> {error || status} </div>
+  <h1 class="title">
+    <div class="smiley">🥸</div><br>
+    HERR STRANZBERG
+  </h1>
   {#if inputNode && outputNode}
     <!-- <Visual3D
       bind:inputNode
@@ -317,6 +288,16 @@
 </div>
 
 <style>
+
+  .title {
+
+    text-align: center;
+  }
+  .smiley {
+    font-size: 192px;
+    display: inline-block;
+    margin-right: 10px;
+  }
   #status {
     position: absolute;
     bottom: 5vh;

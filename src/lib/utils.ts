@@ -27,8 +27,8 @@ function createBlob(data: Float32Array): Blob {
   const l = data.length;
   const int16 = new Int16Array(l);
   for (let i = 0; i < l; i++) {
-    // convert float32 -1 to 1 to int16 -32768 to 32767
-    int16[i] = data[i] * 32768;
+    // convert float32 -1 to 1 to int16 -32768 to 32767, clamp to avoid overflow
+    int16[i] = Math.max(-32768, Math.min(32767, Math.round(data[i] * 32767)));
   }
 
   return {
@@ -49,20 +49,21 @@ async function decodeAudioData(
     sampleRate,
   );
 
-  const dataInt16 = new Int16Array(data.buffer);
+  const dataInt16 = new Int16Array(data.buffer, data.byteOffset, data.byteLength / 2);
   const l = dataInt16.length;
   const dataFloat32 = new Float32Array(l);
   for (let i = 0; i < l; i++) {
     dataFloat32[i] = dataInt16[i] / 32768.0;
   }
   // Extract interleaved channels
-  if (numChannels === 0) {
+  if (numChannels === 1) {
     buffer.copyToChannel(dataFloat32, 0);
   } else {
     for (let i = 0; i < numChannels; i++) {
-      const channel = dataFloat32.filter(
-        (_, index) => index % numChannels === i,
-      );
+      const channel = new Float32Array(buffer.length);
+      for (let j = 0; j < buffer.length; j++) {
+        channel[j] = dataFloat32[j * numChannels + i];
+      }
       buffer.copyToChannel(channel, i);
     }
   }

@@ -1,6 +1,6 @@
-# Dr. Stranzberg
+# Herr Dr. Stranzberg
 
-Dr. Stranzberg ist ein weltklasse Familiencoach, der Eltern dabei hilft, Ihre Kinder in ihrer Selbstwirksamkeit zu stärken und eine sichere Bindung aufzubauen, die Entwicklung und Vertrauen fördert.
+Herr Dr. Stranzberg ist ein weltklasse Familiencoach, der Eltern dabei hilft, Ihre Kinder in ihrer Selbstwirksamkeit zu stärken und eine sichere Bindung aufzubauen, die Entwicklung und Vertrauen fördert.
 
 ### Features
 
