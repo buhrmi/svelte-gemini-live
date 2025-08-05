@@ -1,209 +1,363 @@
-<script>
-  import { GoogleGenAI, Modality } from "@google/genai";
-  const { data } = $props()
-  const token = data.token
+<script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
+  import { GoogleGenAI, type LiveServerMessage, Modality, type Session } from '@google/genai';
+  import { createBlob, decode, decodeAudioData } from '$lib/utils';
+  // import Visual3D from '$lib/Visual3D.svelte';
 
-  const ai = new GoogleGenAI({
-    apiKey: token.name,
-    httpOptions: { apiVersion: 'v1alpha' }
-  });
-  // const model = "gemini-live-2.5-flash-preview"
-  const model = "gemini-2.5-flash-preview-native-audio-dialog"
-  const config = {
-    responseModalities: [Modality.AUDIO],
-    outputAudioTranscription: {},
-    speechConfig: {
-      languageCode: "de-DE",
-      voiceConfig: {
-        prebuiltVoiceConfig: {
-          voiceName: "Charon"
-        }
-      }
-    },
-    systemInstruction:
-      "Du bist Herr Stranzberg, ein weltklasse Familiencoach. Du hilfst Eltern dabei, ihre Kinder in ihrer Selbstwirksamkeit zu stärken und eine sichere Bindung aufzubauen, die Entwicklung und Vertrauen fördert. Solltest du mehr Informationen über die Kinder benötigen (z.B. Alter, Geschlecht, Name), frage danach.",
-  };
+  export let data;
 
-  let audioContext;
-  let audioPlayerNode = null;
-  let session = null;
+  let isRecording = false;
+  let status = '';
+  let error = '';
 
-  // for microphone input
-  let isRecording = $state(false);
-  let stream;
-  let audioProcessor;
-  let source;
+  let client: GoogleGenAI;
+  let session: Session;
+  let inputAudioContext: AudioContext;
+  let outputAudioContext: AudioContext;
+  let inputNode: GainNode;
+  let outputNode: GainNode;
+  let nextStartTime = 0;
+  let mediaStream: MediaStream;
+  let sourceNode: AudioBufferSourceNode;
+  let scriptProcessorNode: ScriptProcessorNode;
+  const sources = new Set<AudioBufferSourceNode>();
+  const BUFFER_DURATION = 0.05; // 50ms buffer for smoother playback
 
-  const responseQueue = $state([]);
-  async function start() {
-    if (!audioContext) {
-      audioContext = new AudioContext();
-      try {
-        await audioContext.audioWorklet.addModule('audio-player-processor.js');
-        audioPlayerNode = new AudioWorkletNode(audioContext, 'audio-player-processor');
-        audioPlayerNode.connect(audioContext.destination);
-      } catch (e) {
-        console.error('Error loading audio worklet:', e);
-      }
-    }
-    session = await ai.live.connect({
-      model: model,
-      callbacks: {
-        onopen: function () {
-          console.debug("Opened");
-        },
-        onmessage: function (message) {
-          responseQueue.push(message);
-        },
-        onerror: function (e) {
-          console.debug("Error:", e.message);
-        },
-        onclose: function (e) {
-          console.debug("Close:", e.reason);
-        },
-      },
-      config: config,
+  function initAudio() {
+    outputAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    outputNode = outputAudioContext.createGain();
+    // Add a small initial delay to prevent immediate playback issues
+    nextStartTime = outputAudioContext.currentTime + BUFFER_DURATION;
+  }
+
+  async function initClient() {
+    initAudio();
+
+    client = new GoogleGenAI({
+      apiKey: data.token.name,
+      httpOptions: { apiVersion: 'v1alpha' },
     });
 
+    outputNode.connect(outputAudioContext.destination);
+
+    initSession();
   }
 
-  function handleTurn(modelTurn) {
-    modelTurn.parts.forEach((part) => {
-      if (part.inlineData) {
-        const base64Audio = part.inlineData.data;
-        // data is base64 encoded audio/pcm;rate=24000
-        const binaryString = atob(base64Audio);
-        const len = binaryString.length;
-        const bytes = new Uint8Array(len);
-        for (let i = 0; i < len; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
-        }
-        
-        // Assuming 16-bit signed PCM
-        const pcmData = new Int16Array(bytes.buffer);
-        const float32Data = new Float32Array(pcmData.length);
-        for (let i = 0; i < pcmData.length; i++) {
-          float32Data[i] = pcmData[i] / 32768.0; // Convert to Float32 range [-1, 1]
-        }
-        
-        if (audioPlayerNode) {
-          const sourceSampleRate = 24000;
-          const targetSampleRate = audioContext.sampleRate;
+  async function initSession() {
+    // const model = 'gemini-2.5-flash-preview-native-audio-dialog';
+    const model = 'gemini-2.5-flash-exp-native-audio-thinking-dialog'
 
-          if (sourceSampleRate === targetSampleRate) {
-            audioPlayerNode.port.postMessage({ audio: float32Data });
-          } else {
-            // Resample audio to match AudioContext's sample rate
-            const ratio = targetSampleRate / sourceSampleRate;
-            const resampledLength = Math.floor(float32Data.length * ratio);
-            const resampledData = new Float32Array(resampledLength);
-            for (let i = 0; i < resampledLength; i++) {
-              const srcIndex = i / ratio;
-              const index1 = Math.floor(srcIndex);
-              const index2 = Math.min(index1 + 1, float32Data.length - 1);
-              const frac = srcIndex - index1;
-              resampledData[i] = float32Data[index1] * (1 - frac) + float32Data[index2] * frac;
+    try {
+      session = await client.live.connect({
+        model: model,
+        callbacks: {
+          onopen: () => {
+            updateStatus('Opened');
+          },
+          onmessage: async (message: LiveServerMessage) => {
+            const audio = message.serverContent?.modelTurn?.parts[0]?.inlineData;
+            console.log(message)
+            if (audio) {
+              // Ensure we're always scheduling slightly ahead
+              nextStartTime = Math.max(
+                nextStartTime,
+                outputAudioContext.currentTime + BUFFER_DURATION / 2,
+              );
+
+              const audioBuffer = await decodeAudioData(
+                decode(audio.data),
+                outputAudioContext,
+                24000,
+                1,
+              );
+              const source = outputAudioContext.createBufferSource();
+              source.buffer = audioBuffer;
+              source.connect(outputNode);
+              source.addEventListener('ended', () => {
+                sources.delete(source);
+              });
+              source.start(nextStartTime);
+              // Add a small overlap to prevent gaps
+              nextStartTime = nextStartTime + audioBuffer.duration;
+              sources.add(source);
             }
-            audioPlayerNode.port.postMessage({ audio: resampledData });
-          }
-        }
-      }
-    })
+
+            const interrupted = message.serverContent?.interrupted;
+            if (interrupted) {
+              for (const source of sources.values()) {
+                source.stop();
+                sources.delete(source);
+              }
+              nextStartTime = 0;
+            }
+          },
+          onerror: (e: ErrorEvent) => {
+            updateError(e.message);
+          },
+          onclose: (e: CloseEvent) => {
+            updateStatus('Close:' + e.reason);
+          },
+        },
+        config: {
+          responseModalities: [Modality.AUDIO],
+          systemInstruction:
+            "Du bist Herr Stranzberg, ein weltklasse Familiencoach. Du sprichst gleichzeitig mit Eltern und Kindern, und hilfst dabei, die Kinder in ihrer Selbstwirksamkeit zu stärken und eine sichere Bindung aufzubauen, die Entwicklung und Vertrauen fördert. Solltest du keine Informationen über die Kinder vorliegen haben (z.B. Alter, Geschlecht, Name), frage danach.",  
+          speechConfig: {
+                languageCode: "de-DE",
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: "Charon"
+                  }
+                }
+              },
+        },
+      });
+    } catch (e) {
+      console.error(e);
+    }
   }
 
-  $effect(() => {
-    while (responseQueue.length > 0) {
-      const response = responseQueue.shift();
-      if (!response.serverContent) continue;
-      if (response.serverContent.interrupted) {
-        if (audioPlayerNode) {
-          audioPlayerNode.port.postMessage({ clear: true });
-        }
-        console.log("INTEERRUPTED")
-      }
-      const modelTurn = response.serverContent.modelTurn;
-      if (modelTurn) handleTurn(modelTurn);
-    }
-  })
+  function updateStatus(msg: string) {
+    status = msg;
+  }
+
+  function updateError(msg: string) {
+    error = msg;
+  }
 
   async function startRecording() {
-    if (isRecording) return;
-    isRecording = true;
-    
-    if (!session) {
-      await start();
+    if (isRecording) {
+      return;
     }
-    
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    if (!audioContext) {
-      audioContext = new AudioContext();
-      try {
-        await audioContext.audioWorklet.addModule('audio-player-processor.js');
-        audioPlayerNode = new AudioWorkletNode(audioContext, 'audio-player-processor');
-        audioPlayerNode.connect(audioContext.destination);
-      } catch (e) {
-        console.error('Error loading audio worklet:', e);
-      }
-    }
-    // Resume AudioContext on user gesture
-    if (audioContext.state === 'suspended') {
-      audioContext.resume();
-    }
-    source = audioContext.createMediaStreamSource(stream);
-    audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
 
-    const targetSampleRate = 16000;
-    const resampleRatio = audioContext.sampleRate / targetSampleRate;
+    updateStatus('Requesting microphone access...');
 
-    audioProcessor.onaudioprocess = (e) => {
-      const inputData = e.inputBuffer.getChannelData(0);
-      const outputLength = Math.floor(inputData.length / resampleRatio);
-      const outputData = new Int16Array(outputLength);
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
 
-      for (let i = 0; i < outputLength; i++) {
-        const index = Math.floor(i * resampleRatio);
-        let sample = inputData[index];
-        sample = Math.max(-1, Math.min(1, sample)); // clamp
-        outputData[i] = sample * 32767;
-      }
+      updateStatus('Microphone access granted. Starting capture...');
 
-      const base64Audio = btoa(String.fromCharCode.apply(null, new Uint8Array(outputData.buffer)));
+      const track = mediaStream.getAudioTracks()[0];
+      const settings = track.getSettings();
+
+      // Create AudioContext without specifying sample rate to avoid mismatch
+      inputAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+      inputNode = inputAudioContext.createGain();
+
+      sourceNode = inputAudioContext.createMediaStreamSource(
+        mediaStream,
+      );
+      sourceNode.connect(inputNode);
+
+      // Increase buffer size for Firefox compatibility
+      const bufferSize = 4096; // Increased from 256
+      scriptProcessorNode = inputAudioContext.createScriptProcessor(
+        bufferSize,
+        1,
+        1,
+      );
+      const targetSampleRate = 16000;
+      const resampleRatio = inputAudioContext.sampleRate / targetSampleRate;
       
-      if (session && isRecording) {
-        session.sendRealtimeInput({
-          audio: {
-            data: base64Audio,
-            mimeType: "audio/pcm;rate=16000"
-          }
-        });
-      }
-    };
+      // Add a buffer to accumulate samples for smoother transmission
+      let accumulatedSamples = [];
+      const SAMPLES_PER_CHUNK = 1600; // 100ms at 16kHz
+      
+      scriptProcessorNode.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        const outputLength = Math.floor(inputData.length / resampleRatio);
+        const outputData = new Int16Array(outputLength);
 
-    source.connect(audioProcessor);
-    audioProcessor.connect(audioContext.destination); // Connect to destination to keep the process running.
+        // Improved resampling with linear interpolation
+        for (let i = 0; i < outputLength; i++) {
+          const exactIndex = i * resampleRatio;
+          const index = Math.floor(exactIndex);
+          const fraction = exactIndex - index;
+          
+          let sample = inputData[index];
+          if (index + 1 < inputData.length) {
+            const nextSample = inputData[index + 1];
+            sample = sample * (1 - fraction) + nextSample * fraction;
+          }
+          
+          sample = Math.max(-1, Math.min(1, sample)); // clamp
+          outputData[i] = Math.round(sample * 32767);
+        }
+
+        // Accumulate samples
+        accumulatedSamples.push(...outputData);
+        
+        // Send in chunks to reduce overhead
+        while (accumulatedSamples.length >= SAMPLES_PER_CHUNK) {
+          const chunk = new Int16Array(accumulatedSamples.slice(0, SAMPLES_PER_CHUNK));
+          accumulatedSamples = accumulatedSamples.slice(SAMPLES_PER_CHUNK);
+          
+          const base64Audio = btoa(String.fromCharCode.apply(null, new Uint8Array(chunk.buffer)));
+          
+          if (session && isRecording) {
+            session.sendRealtimeInput({
+              audio: {
+                data: base64Audio,
+                mimeType: "audio/pcm;rate=16000"
+              }
+            });
+          }
+        }
+      };
+
+      sourceNode.connect(scriptProcessorNode);
+      scriptProcessorNode.connect(inputAudioContext.destination);
+
+      isRecording = true;
+      updateStatus('🔴 Recording... Capturing PCM chunks.');
+    } catch (err) {
+      console.error('Error starting recording:', err);
+      updateStatus(`Error: ${err.message}`);
+      stopRecording();
+    }
   }
 
   function stopRecording() {
-    if (!isRecording) return;
+    if (!isRecording && !mediaStream && !inputAudioContext) return;
+
+    updateStatus('Stopping recording...');
+
     isRecording = false;
 
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
+    if (scriptProcessorNode && sourceNode && inputAudioContext) {
+      scriptProcessorNode.disconnect();
+      sourceNode.disconnect();
     }
-    if (source) {
-      source.disconnect();
+
+    scriptProcessorNode = null;
+    sourceNode = null;
+
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((track) => track.stop());
+      mediaStream = null;
     }
-    if (audioProcessor) {
-      audioProcessor.disconnect();
-    }
-    if (audioPlayerNode) {
-      audioPlayerNode.port.postMessage({ clear: true });
-    }
+
+    updateStatus('Recording stopped. Click Start to begin again.');
   }
+
+  function reset() {
+    session?.close();
+    initSession();
+    updateStatus('Session cleared.');
+  }
+
+  onMount(() => {
+    initClient();
+  });
+
+  onDestroy(() => {
+    stopRecording();
+    session?.close();
+    inputAudioContext?.close();
+    outputAudioContext?.close();
+  });
 </script>
 
-{#if isRecording}
-  <button onclick={stopRecording}>STOP</button>
-{:else}
-  <button onclick={startRecording}>START</button>
-{/if}
+<div>
+  <div class="controls">
+    <button
+      id="resetButton"
+      on:click={reset}
+      disabled={isRecording}>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        height="40px"
+        viewBox="0 -960 960 960"
+        width="40px"
+        fill="#ffffff">
+        <path
+          d="M480-160q-134 0-227-93t-93-227q0-134 93-227t227-93q69 0 132 28.5T720-690v-110h80v280H520v-80h168q-32-56-87.5-88T480-720q-100 0-170 70t-70 170q0 100 70 170t170 70q77 0 139-44t87-116h84q-28 106-114 173t-196 67Z" />
+      </svg>
+    </button>
+    <button
+      id="startButton"
+      on:click={startRecording}
+      disabled={isRecording}>
+      <svg
+        viewBox="0 0 100 100"
+        width="32px"
+        height="32px"
+        fill="#c80000"
+        xmlns="http://www.w3.org/2000/svg">
+        <circle cx="50" cy="50" r="50" />
+      </svg>
+    </button>
+    <button
+      id="stopButton"
+      on:click={stopRecording}
+      disabled={!isRecording}>
+      <svg
+        viewBox="0 0 100 100"
+        width="32px"
+        height="32px"
+        fill="#000000"
+        xmlns="http://www.w3.org/2000/svg">
+        <rect x="0" y="0" width="100" height="100" rx="15" />
+      </svg>
+    </button>
+  </div>
+
+  <div id="status"> {error || status} </div>
+  {#if inputNode && outputNode}
+    <!-- <Visual3D
+      bind:inputNode
+      bind:outputNode /> -->
+  {/if}
+</div>
+
+<style>
+  #status {
+    position: absolute;
+    bottom: 5vh;
+    left: 0;
+    right: 0;
+    z-index: 10;
+    text-align: center;
+  }
+
+  .controls {
+    z-index: 10;
+    position: absolute;
+    bottom: 10vh;
+    left: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .controls button {
+    outline: none;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: white;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.1);
+    width: 64px;
+    height: 64px;
+    cursor: pointer;
+    font-size: 24px;
+    padding: 0;
+    margin: 0;
+  }
+
+  .controls button:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  .controls button[disabled] {
+    display: none;
+  }
+</style>

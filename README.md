@@ -1,6 +1,6 @@
-# Svelte-Gemini-Live
+# Dr. Stranzberg
 
-A quick-and-dirty prototype using Google Gemini's [Live API](https://ai.google.dev/gemini-api/docs/live) with live audio models (e.g. `gemini-live-2.5-flash-preview`) using Svelte.
+Dr. Stranzberg ist ein weltklasse Familiencoach, der Eltern dabei hilft, Ihre Kinder in ihrer Selbstwirksamkeit zu stärken und eine sichere Bindung aufzubauen, die Entwicklung und Vertrauen fördert.
 
 ### Features
 
