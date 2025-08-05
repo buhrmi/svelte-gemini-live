@@ -151,7 +151,7 @@
       inputAudioContext = new (window.AudioContext || window.webkitAudioContext)();
       
       // Load the AudioWorklet module
-      await inputAudioContext.audioWorklet.addModule('/src/lib/pcm-processor.js');
+      await inputAudioContext.audioWorklet.addModule('/pcm-processor.js');
       
       inputNode = inputAudioContext.createGain();
 
