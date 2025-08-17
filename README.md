@@ -1,6 +1,6 @@
-# Herr Dr. Stranzberg
+# Herr Stranzberg
 
-Herr Dr. Stranzberg ist ein weltklasse Familiencoach, der Eltern dabei hilft, Ihre Kinder in ihrer Selbstwirksamkeit zu stärken und eine sichere Bindung aufzubauen, die Entwicklung und Vertrauen fördert.
+Herr Stranzberg ist eine weltberühmter Familiencoach-KI, trainiert auf Montessori-Pädagokik. Er hilft Eltern dabei, Ihre Kinder in ihrer Selbstwirksamkeit zu stärken und eine sichere Bindung aufzubauen, die Entwicklung und Vertrauen fördert.
 
 ### Features
 
