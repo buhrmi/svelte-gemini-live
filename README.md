@@ -1,6 +1,6 @@
 # Herr Stranzberg
 
-Herr Stranzberg ist eine weltberühmter Familiencoach-KI, trainiert auf Montessori-Pädagokik. Er hilft Eltern dabei, Ihre Kinder in ihrer Selbstwirksamkeit zu stärken und eine sichere Bindung aufzubauen, die Entwicklung und Vertrauen fördert.
+Herr Stranzberg ist eine auf Montessori-Pädagogik trainierte KI. Sie hilft Familien dabei, Ihre Kinder in ihrer Selbstwirksamkeit zu stärken und eine sichere Bindung aufzubauen, die Entwicklung und Vertrauen fördert.
 
 ### Features
 
